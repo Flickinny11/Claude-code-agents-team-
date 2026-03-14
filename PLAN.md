@@ -1373,10 +1373,96 @@ class Hooks:
     stop: Callable | None = None             # Agent finishing
     subagent_start: Callable | None = None   # Subagent spawning
     subagent_stop: Callable | None = None    # Subagent finished
+    user_prompt_submit: Callable | None = None  # User sends message
 ```
 
 `TeammateIdle` hook: exit with code 2 to send feedback and keep teammate working.
 `TaskCompleted` hook: exit with code 2 to prevent completion and send feedback.
+
+### Hook Handler Types (Matching Claude Code)
+
+Claude Code supports four hook handler types. We implement all four:
+
+| Type | What It Does | Use Case |
+|------|-------------|----------|
+| `command` | Runs a shell command | `npm test`, lint checks |
+| `http` | Calls an HTTP endpoint | External validation services |
+| `prompt` | Fast Haiku model evaluation | "Does this code have security issues?" |
+| `agent` | Spawns a subagent with tools (up to 50 turns) | Deep verification — run tests, read files, verify correctness |
+
+The `agent` handler type is powerful — it means a hook can itself be an intelligent agent that investigates whether the task was truly completed correctly. Not just "did the exit code succeed" but "does the implementation actually make sense."
+
+---
+
+## Part 14b: Coordination Patterns
+
+The system supports five distinct coordination patterns. The lead agent chooses which pattern to use based on the task — this is a REASONING decision, not a configuration option:
+
+### Pattern 1: Leader (Hierarchical)
+Lead assigns all tasks directly. Teammates report back. Classic hub-and-spoke.
+```
+Lead creates tasks → assigns each to specific teammate → monitors → synthesizes
+```
+Best for: well-understood work with clear delegation.
+
+### Pattern 2: Swarm (Self-Organizing)
+Workers autonomously claim from a shared task queue. No explicit assignment.
+```
+Lead creates tasks → teammates poll TaskList → claim available work → repeat
+```
+Best for: many independent tasks of similar complexity.
+
+### Pattern 3: Pipeline (Sequential Dependencies)
+Tasks chain with `blockedBy` dependencies. Work flows through stages.
+```
+Task 1 (research) → Task 2 (implement, blockedBy: [1]) → Task 3 (test, blockedBy: [2])
+```
+Best for: work that must happen in order (schema → migration → API → tests).
+
+### Pattern 4: Council (Multi-Perspective)
+Multiple agents investigate the same problem from different angles. They message each other to debate.
+```
+3 agents investigate same bug → share findings → challenge each other → converge on root cause
+```
+Best for: debugging, architecture decisions, code review.
+
+### Pattern 5: Watchdog (Background Monitor)
+One agent monitors (runs tests, checks logs) while others implement. Spawns fixers on failures.
+```
+Watchdog agent runs tests every N minutes → detects failure → messages implementer → or spawns fixer
+```
+Best for: continuous validation during large refactors.
+
+The lead doesn't pick a "mode" — it reasons about the task and naturally gravitates toward the right pattern. A single team session might use multiple patterns as the work evolves.
+
+---
+
+## Part 14c: Teammate State Machine
+
+Each teammate has a lifecycle with 5 coarse states:
+
+```
+        ┌───────────────────────────────────────┐
+        │                                       │
+        ▼                                       │
+    ┌───────┐      ┌──────┐      ┌───────┐     │
+    │ ready │─────▶│ busy │─────▶│ ready │─────┘
+    └───────┘      └──────┘      └───────┘
+        │                            │
+        ▼                            ▼
+    ┌────────────────────┐    ┌────────────────────┐
+    │ shutdown_requested │    │ shutdown_requested │
+    └────────────────────┘    └────────────────────┘
+        │                            │
+        ▼                            ▼
+    ┌──────────┐              ┌──────────┐
+    │ shutdown │              │ shutdown │
+    └──────────┘              └──────────┘
+```
+
+Plus an `error` state for crashed teammates (auto-detected after 5-minute heartbeat timeout, tasks reclaimable).
+
+**Recovery on restart**: If the process restarts, scan teams for "busy" members, force-transition to "ready", inject notification into leads listing interrupted teammates. No automatic restart of interrupted teammates — the lead decides what to do.
 
 ---
 
