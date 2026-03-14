@@ -452,6 +452,30 @@ class Inbox:
             self.path.write_text(json.dumps(messages, indent=2))
 ```
 
+### Message Types (Complete)
+
+The `text` field in inbox messages is either plain text or stringified JSON with a `type` field:
+
+| Type | Direction | Purpose |
+|------|-----------|---------|
+| `task_assignment` | lead → teammate | Assign work |
+| `message` | any → any | Direct peer message (plain text) |
+| `broadcast` | lead → all | Team-wide announcement (writes to every inbox) |
+| `shutdown_request` | lead → teammate | Graceful termination request |
+| `shutdown_approved` | teammate → lead | Accepts shutdown |
+| `shutdown_rejected` | teammate → lead | Declines with reason |
+| `plan_approval_request` | teammate → lead | Submit plan for review |
+| `plan_approved` | lead → teammate | Approve plan |
+| `plan_rejected` | lead → teammate | Reject plan with feedback |
+| `idle_notification` | teammate → lead | Heartbeat — "I'm free" signal |
+| `task_completed` | teammate → lead/all | Task status update |
+| `permission_request` | teammate → lead | Tool permission escalation |
+| `join_request` | agent → lead | Request team membership |
+
+### Idle/Wake Protocol
+
+After every LLM turn where a teammate has no more work, it automatically sends `idle_notification` to the lead every ~2-4 seconds (acts as both "I'm available" and heartbeat). Sending any message to an idle teammate **wakes it** on the next poll cycle. This is how the lead re-activates teammates when new tasks are created or when it needs something done.
+
 ### Inbox Polling
 
 Each agent's grind loop has an `inbox_check` callback that polls between turns:
@@ -497,6 +521,10 @@ class Task:
     created_at: str = ""            # ISO 8601
     completed_at: str | None = None
 ```
+
+The task directory also contains:
+- `.lock` — filesystem-level `flock()` mutex for atomic task claiming
+- `.highwatermark` — next available task ID (auto-incrementing counter)
 
 Example `state/tasks/my-project/3.json`:
 ```json
@@ -1466,6 +1494,38 @@ rich                 # Terminal UI (live rendering for streaming output)
 httpx                # HTTP client for WebFetch
 textual              # TUI framework (optional, for split-pane display)
 ```
+
+---
+
+## Part 16: Git Worktree Isolation (Optional but Important)
+
+Real Claude Code agent teams can use git worktrees to give each teammate its own filesystem. This prevents file conflicts entirely — each agent commits to its own branch, and merging happens through standard git workflows.
+
+```python
+class WorktreeManager:
+    """Create and manage git worktrees for teammate isolation."""
+
+    async def create_worktree(self, agent_name: str) -> str:
+        """Create an isolated worktree for a teammate."""
+        branch_name = f"worktree-agent-{agent_name}"
+        worktree_path = f".claude/worktrees/{agent_name}"
+
+        await run_bash(f"git worktree add {worktree_path} -b {branch_name}")
+        return os.path.abspath(worktree_path)
+
+    async def cleanup_worktree(self, agent_name: str):
+        """Remove worktree. Keep branch if it has commits."""
+        worktree_path = f".claude/worktrees/{agent_name}"
+        has_commits = await run_bash(
+            f"git -C {worktree_path} log --oneline origin/main..HEAD | wc -l"
+        )
+        await run_bash(f"git worktree remove {worktree_path}")
+        if int(has_commits.strip()) == 0:
+            branch_name = f"worktree-agent-{agent_name}"
+            await run_bash(f"git branch -D {branch_name}")
+```
+
+When worktree isolation is enabled, each teammate's `cwd` is set to its worktree. The teammate works on files freely without worrying about conflicts with other agents. After completion, branches can be merged via PR or direct merge.
 
 ---
 
