@@ -320,6 +320,7 @@ That's not a task. That's thinking.
 - **Compaction preserves agency.** When context gets long, we summarize older turns but keep recent decisions, file paths modified, and task state. The agent doesn't lose track of what it was doing.
 - **Parallel tool execution for read-only tools.** If Claude calls `Read` on 3 files simultaneously, we execute them in parallel. `Edit` and `Bash` run sequentially to avoid conflicts.
 - **Tool output streams too.** When Bash runs a long command, output streams live. The agent (and the user) can see it happening. Not "wait 30 seconds, then dump output."
+- **Real-time steering (mid-task injection).** Claude Code internally uses an async dual-buffer queue (codenamed "h2A") that lets users inject new instructions while the agent is actively working. We replicate this: the user can type a message to any agent mid-turn, and it gets queued to appear in the agent's next context window. The agent adjusts its plan on the fly without restarting. This is critical for the lead-to-teammate communication flow — the lead might redirect a teammate mid-task based on new information.
 
 ---
 
@@ -876,6 +877,8 @@ No DAG produces this. No task queue produces this. This emerges from a thinking,
 
 The system prompt is critical. It's what makes agents behave like agents, not chatbots.
 
+**Important context**: Claude Code doesn't use a single monolithic system prompt. It assembles **110+ separate prompt strings** conditionally based on environment, configuration, tools loaded, and agent role. We replicate this modular approach — the system prompt is built from composable parts, not a single template.
+
 ### Base System Prompt (All Agents)
 
 Faithful to Claude Code's actual system prompt. Key sections:
@@ -1150,9 +1153,11 @@ Every turn adds to the message list:
 
 This grows linearly. A 30-turn session can easily hit 100K+ tokens.
 
+Content that stays the same across turns (system prompt, tool definitions, CLAUDE.md) is automatically **prompt cached** by the Anthropic API, which reduces cost and latency for repeated prefixes. This is not something we implement — it's a property of the API that we benefit from by keeping the system prompt stable.
+
 ### Compaction
 
-When context approaches the limit (configurable, default ~80% of 200K), we compact:
+Claude Code triggers compaction at approximately **92% context window usage**. We replicate this threshold:
 
 ```python
 async def compact_context(
